@@ -131,6 +131,7 @@ function pathToPolys(op,seg){
   return polys;
 }
 function unionPolys(polys){ polys.forEach(p=>{if(!ClipperLib.Clipper.Orientation(p))p.reverse();}); const out=new ClipperLib.Paths(); const c=new ClipperLib.Clipper(); c.AddPaths(polys,ClipperLib.PolyType.ptSubject,true); c.Execute(ClipperLib.ClipType.ctUnion,out,ClipperLib.PolyFillType.pftNonZero,ClipperLib.PolyFillType.pftNonZero); return out; }
+function capsule(x1,y1,x2,y2,w){ let dx=x2-x1,dy=y2-y1,L=Math.hypot(dx,dy)||1; const px=-dy/L*w/2,py=dx/L*w/2; return [{X:Math.round(x1+px),Y:Math.round(y1+py)},{X:Math.round(x2+px),Y:Math.round(y2+py)},{X:Math.round(x2-px),Y:Math.round(y2-py)},{X:Math.round(x1-px),Y:Math.round(y1-py)}]; }
 function iconPolys(type,size){
   const R=size/2;
   const neg=pts=>pts.map(p=>({X:Math.round(p.x*SC),Y:Math.round(-p.y*SC)}));
@@ -188,19 +189,30 @@ function rebuild(){
   const tgeo=textGeo(op, engrave?th+0.2:th);
   const tpolys=pathToPolys(op,8);
   if(!tgeo||!tpolys.length){ status.textContent='⚠️ 此字型可能無此字，換個字型試試'; return; }
-  // 右側圖案
+  // 文字範圍 (SC, y-down)
+  let mnX=Infinity,mxX=-Infinity,mnY=Infinity,mxY=-Infinity;
+  tpolys.forEach(p=>p.forEach(q=>{if(q.X<mnX)mnX=q.X;if(q.X>mxX)mxX=q.X;if(q.Y<mnY)mnY=q.Y;if(q.Y>mxY)mxY=q.Y;}));
+  const cYsc=(mnY+mxY)/2, tH=mxY-mnY;
+  const connW=Math.max(2.4,pad)*SC;
+  // 吊環(左側,較薄)
+  const ringWall=2.0, ringTab=hd/2+ringWall, ringGap=4;
+  const ringCxSC=mnX-(ringGap+ringTab)*SC;
+  const baseY=mxY-tH*0.08;
+  const conns=[];
+  conns.push(capsule(ringCxSC,baseY,mxX,baseY,connW));      // 底部連接條(連所有字)
+  conns.push(capsule(ringCxSC,cYsc,ringCxSC,baseY,connW));  // 吊環脖子→連接條
+  // 右上角圖案
   const iconType=document.getElementById('p_icon').value, isz=P('p_isz');
   document.getElementById('v_isz').textContent=isz;
-  let allPolys=tpolys, iconGeo=null;
+  let iconGeo=null, ipT=null;
   if(iconType!=='none'){
-    let mxX=-Infinity,mnY=Infinity,mxY=-Infinity;
-    tpolys.forEach(p=>p.forEach(q=>{if(q.X>mxX)mxX=q.X;if(q.Y<mnY)mnY=q.Y;if(q.Y>mxY)mxY=q.Y;}));
-    const ix=mxX+isz*0.9*SC, iy=(mnY+mxY)/2;
-    const ip=iconPolys(iconType,isz).map(poly=>poly.map(q=>({X:q.X+ix,Y:q.Y+iy})));
-    allPolys=tpolys.concat(ip);
-    const ish=clipperToShapes(ip);
+    const ix=mxX+(isz*0.5)*SC, iy=mnY+(isz*0.30)*SC;       // 名字右上角
+    ipT=iconPolys(iconType,isz).map(poly=>poly.map(q=>({X:q.X+ix,Y:q.Y+iy})));
+    conns.push(capsule(mxX,mnY+tH*0.22,ix,iy,connW));        // 連接圖案
+    const ish=clipperToShapes(ipT);
     if(ish.length) iconGeo=new THREE.ExtrudeGeometry(ish,{depth:engrave?th+0.2:th,bevelEnabled:false,curveSegments:2});
   }
+  let allPolys=tpolys.concat(conns); if(ipT) allPolys=allPolys.concat(ipT);
   const psol=offsetPlate(allPolys,pad);
   if(!psol.length){ status.textContent='⚠️ 生成失敗'; return; }
 
@@ -208,27 +220,25 @@ function rebuild(){
   group=new THREE.Group();
 
   const pgeo=new THREE.ExtrudeGeometry(clipperToShapes(psol),{depth:pt,bevelEnabled:false,curveSegments:1});
-  pgeo.scale(1,-1,1); pgeo.computeBoundingBox();
-  const pbb=pgeo.boundingBox;
-  const ringTab=hd/2+3.2, ringX=pbb.min.x-ringTab*0.35, ringY=(pbb.min.y+pbb.max.y)/2;
-  const rs=new THREE.Shape(); rs.absarc(ringX,ringY,ringTab,0,Math.PI*2,false);
-  const rh=new THREE.Path(); rh.absarc(ringX,ringY,hd/2,0,Math.PI*2,true); rs.holes.push(rh);
-  const rgeo=new THREE.ExtrudeGeometry(rs,{depth:pt,bevelEnabled:false,curveSegments:32});
-  tgeo.scale(1,-1,1);
-  const minX=Math.min(pbb.min.x, ringX-ringTab), maxX=pbb.max.x;
-  const cX=(minX+maxX)/2, cY=ringY;
-  pgeo.translate(-cX,-cY,0); rgeo.translate(-cX,-cY,0); tgeo.translate(-cX,-cY,0);
+  pgeo.scale(1,-1,1); pgeo.computeBoundingBox(); const pbb=pgeo.boundingBox;
+  // 吊環(薄環), flipped 座標
+  const rcx=ringCxSC/SC, rcy=-cYsc/SC;
+  const rs=new THREE.Shape(); rs.absarc(rcx,rcy,ringTab,0,Math.PI*2,false);
+  const rh=new THREE.Path(); rh.absarc(rcx,rcy,hd/2,0,Math.PI*2,true); rs.holes.push(rh);
+  const rgeo=new THREE.ExtrudeGeometry(rs,{depth:pt,bevelEnabled:false,curveSegments:40});
+  tgeo.scale(1,-1,1); if(iconGeo) iconGeo.scale(1,-1,1);
+  const minX=Math.min(pbb.min.x,rcx-ringTab), maxX=Math.max(pbb.max.x,rcx+ringTab);
+  const minY=Math.min(pbb.min.y,rcy-ringTab), maxY=Math.max(pbb.max.y,rcy+ringTab);
+  const cX=(minX+maxX)/2, cY=(minY+maxY)/2;
+  pgeo.translate(-cX,-cY,0); rgeo.translate(-cX,-cY,0); tgeo.translate(-cX,-cY,0); if(iconGeo) iconGeo.translate(-cX,-cY,0);
 
   group.add(new THREE.Mesh(pgeo,matPlate));
   group.add(new THREE.Mesh(rgeo,matPlate));
-  const tm=new THREE.Mesh(tgeo,matText);
-  tm.position.z = engrave ? (pt-th) : pt;
-  group.add(tm);
-  if(iconGeo){ iconGeo.scale(1,-1,1); iconGeo.translate(-cX,-cY,0); const im=new THREE.Mesh(iconGeo,matText); im.position.z = engrave?(pt-th):pt; group.add(im); }
-  group.rotation.x=-Math.PI/2;
-  scene.add(group);
+  const tm=new THREE.Mesh(tgeo,matText); tm.position.z=engrave?(pt-th):pt; group.add(tm);
+  if(iconGeo){ const im=new THREE.Mesh(iconGeo,matText); im.position.z=engrave?(pt-th):pt; group.add(im); }
+  group.rotation.x=-Math.PI/2; scene.add(group);
 
-  document.getElementById('dims').innerHTML=`尺寸 <b>${(maxX-minX).toFixed(0)}×${(pbb.max.y-pbb.min.y).toFixed(0)}</b> mm<br>總厚 <b>${(pt+(engrave?0:th)).toFixed(1)}</b> mm`;
+  document.getElementById('dims').innerHTML=`尺寸 <b>${(maxX-minX).toFixed(0)}×${(maxY-minY).toFixed(0)}</b> mm<br>總厚 <b>${(pt+(engrave?0:th)).toFixed(1)}</b> mm`;
   status.textContent=`✅ 已生成：「${text}」`;
 }
 
