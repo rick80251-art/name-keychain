@@ -57,6 +57,19 @@
       <div class="row chk"><input type="checkbox" id="p_engrave"><label style="margin:0">文字改凹刻（內凹）</label></div>
     </div>
 
+    <div class="group"><h2>右側圖案</h2>
+      <select id="p_icon">
+        <option value="none">無</option>
+        <option value="star">★ 星星</option>
+        <option value="clover">🍀 四葉草</option>
+        <option value="heart">♥ 愛心</option>
+        <option value="flower">✿ 小花</option>
+        <option value="diamond">◆ 鑽石</option>
+        <option value="circle">● 圓點</option>
+      </select>
+      <div class="row" style="margin-top:8px"><label>圖案大小 <b><span id="v_isz">18</span> mm</b></label><input type="range" id="p_isz" min="6" max="40" step="1" value="18"></div>
+    </div>
+
     <div class="group"><h2>吊環孔</h2>
       <div class="row"><label>孔徑 <b><span id="v_hd">5</span> mm</b></label><input type="range" id="p_hd" min="2" max="12" step="0.5" value="5"></div>
     </div>
@@ -117,6 +130,26 @@ function pathToPolys(op,seg){
   if(cur&&cur.length>2)polys.push(cur);
   return polys;
 }
+function unionPolys(polys){ polys.forEach(p=>{if(!ClipperLib.Clipper.Orientation(p))p.reverse();}); const out=new ClipperLib.Paths(); const c=new ClipperLib.Clipper(); c.AddPaths(polys,ClipperLib.PolyType.ptSubject,true); c.Execute(ClipperLib.ClipType.ctUnion,out,ClipperLib.PolyFillType.pftNonZero,ClipperLib.PolyFillType.pftNonZero); return out; }
+function iconPolys(type,size){
+  const R=size/2;
+  const neg=pts=>pts.map(p=>({X:Math.round(p.x*SC),Y:Math.round(-p.y*SC)}));
+  const circ=(cx,cy,r,seg)=>{const a=[];seg=seg||40;for(let i=0;i<seg;i++){const t=i/seg*2*Math.PI;a.push({x:cx+r*Math.cos(t),y:cy+r*Math.sin(t)});}return a;};
+  if(type==='star'){const a=[];for(let i=0;i<10;i++){const ang=-Math.PI/2+i*Math.PI/5,rr=i%2?R*0.42:R;a.push({x:rr*Math.cos(ang),y:rr*Math.sin(ang)});}return unionPolys([neg(a)]);}
+  if(type==='diamond')return unionPolys([neg([{x:0,y:R},{x:R*0.7,y:0},{x:0,y:-R},{x:-R*0.7,y:0}])]);
+  if(type==='circle')return unionPolys([neg(circ(0,0,R*0.85,48))]);
+  if(type==='heart'){const a=[];for(let i=0;i<=64;i++){const t=i/64*2*Math.PI,x=16*Math.pow(Math.sin(t),3),y=13*Math.cos(t)-5*Math.cos(2*t)-2*Math.cos(3*t)-Math.cos(4*t);a.push({x:x/34*size,y:y/34*size});}return unionPolys([neg(a)]);}
+  if(type==='clover'){const d=R*0.42,lr=R*0.5;const parts=[circ(0,d,lr),circ(0,-d,lr),circ(d,0,lr),circ(-d,0,lr)].map(neg);parts.push(neg([{x:-R*0.09,y:-d},{x:R*0.09,y:-d},{x:R*0.06,y:-R},{x:-R*0.06,y:-R}]));return unionPolys(parts);}
+  if(type==='flower'){const parts=[];for(let k=0;k<6;k++){const ang=k*Math.PI/3;parts.push(neg(circ(Math.cos(ang)*R*0.5,Math.sin(ang)*R*0.5,R*0.34)));}parts.push(neg(circ(0,0,R*0.32)));return unionPolys(parts);}
+  return new ClipperLib.Paths();
+}
+function offsetPlate(polys,pad){
+  const ps=polys.map(p=>p.slice()); ps.forEach(p=>{if(!ClipperLib.Clipper.Orientation(p))p.reverse();});
+  const uni=new ClipperLib.Paths(); const c=new ClipperLib.Clipper(); c.AddPaths(ps,ClipperLib.PolyType.ptSubject,true);
+  c.Execute(ClipperLib.ClipType.ctUnion,uni,ClipperLib.PolyFillType.pftNonZero,ClipperLib.PolyFillType.pftNonZero);
+  const co=new ClipperLib.ClipperOffset(2,SC*0.25); co.AddPaths(uni,ClipperLib.JoinType.jtRound,ClipperLib.EndType.etClosedPolygon);
+  const sol=new ClipperLib.Paths(); co.Execute(sol,pad*SC); return sol;
+}
 function platePaths(op,pad){
   let polys=pathToPolys(op,8);
   polys.forEach(p=>{ if(!ClipperLib.Clipper.Orientation(p)) p.reverse(); });
@@ -153,8 +186,23 @@ function rebuild(){
 
   const op=FONT.getPath(text,0,0,fs);
   const tgeo=textGeo(op, engrave?th+0.2:th);
-  const psol=platePaths(op,pad);
-  if(!tgeo||!psol.length){ status.textContent='⚠️ 此字型可能無此字，換個字型試試'; return; }
+  const tpolys=pathToPolys(op,8);
+  if(!tgeo||!tpolys.length){ status.textContent='⚠️ 此字型可能無此字，換個字型試試'; return; }
+  // 右側圖案
+  const iconType=document.getElementById('p_icon').value, isz=P('p_isz');
+  document.getElementById('v_isz').textContent=isz;
+  let allPolys=tpolys, iconGeo=null;
+  if(iconType!=='none'){
+    let mxX=-Infinity,mnY=Infinity,mxY=-Infinity;
+    tpolys.forEach(p=>p.forEach(q=>{if(q.X>mxX)mxX=q.X;if(q.Y<mnY)mnY=q.Y;if(q.Y>mxY)mxY=q.Y;}));
+    const ix=mxX+isz*0.9*SC, iy=(mnY+mxY)/2;
+    const ip=iconPolys(iconType,isz).map(poly=>poly.map(q=>({X:q.X+ix,Y:q.Y+iy})));
+    allPolys=tpolys.concat(ip);
+    const ish=clipperToShapes(ip);
+    if(ish.length) iconGeo=new THREE.ExtrudeGeometry(ish,{depth:engrave?th+0.2:th,bevelEnabled:false,curveSegments:2});
+  }
+  const psol=offsetPlate(allPolys,pad);
+  if(!psol.length){ status.textContent='⚠️ 生成失敗'; return; }
 
   if(group){ scene.remove(group); group.traverse(o=>o.geometry&&o.geometry.dispose()); }
   group=new THREE.Group();
@@ -176,6 +224,7 @@ function rebuild(){
   const tm=new THREE.Mesh(tgeo,matText);
   tm.position.z = engrave ? (pt-th) : pt;
   group.add(tm);
+  if(iconGeo){ iconGeo.scale(1,-1,1); iconGeo.translate(-cX,-cY,0); const im=new THREE.Mesh(iconGeo,matText); im.position.z = engrave?(pt-th):pt; group.add(im); }
   group.rotation.x=-Math.PI/2;
   scene.add(group);
 
@@ -200,6 +249,7 @@ function loadFont(url,label){ status.textContent='載入字型：'+label+'…';
 document.querySelectorAll('#panel input[type=range]').forEach(el=>el.addEventListener('input',rebuild));
 document.getElementById('p_txt').addEventListener('input',rebuild);
 document.getElementById('p_engrave').addEventListener('change',rebuild);
+document.getElementById('p_icon').addEventListener('change',rebuild);
 document.getElementById('p_font').addEventListener('change',e=>{ const o=e.target.selectedOptions[0]; loadFont(o.value,o.textContent); });
 document.getElementById('fontfile').addEventListener('change',e=>{ const f=e.target.files[0]; if(!f)return; const fr=new FileReader();
   fr.onload=()=>{ try{ FONT=opentype.parse(fr.result); rebuild(); status.textContent='✅ 已套用字型：'+f.name; }catch(err){ status.textContent='字型讀取失敗：'+err.message; } }; fr.readAsArrayBuffer(f); });
