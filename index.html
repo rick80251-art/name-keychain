@@ -144,12 +144,20 @@ function iconPolys(type,size){
   if(type==='flower'){const parts=[];for(let k=0;k<6;k++){const ang=k*Math.PI/3;parts.push(neg(circ(Math.cos(ang)*R*0.5,Math.sin(ang)*R*0.5,R*0.34)));}parts.push(neg(circ(0,0,R*0.32)));return unionPolys(parts);}
   return new ClipperLib.Paths();
 }
-function offsetPlate(polys,pad){
+function closePlate(polys,padMM,bridgeMM){
   const ps=polys.map(p=>p.slice()); ps.forEach(p=>{if(!ClipperLib.Clipper.Orientation(p))p.reverse();});
   const uni=new ClipperLib.Paths(); const c=new ClipperLib.Clipper(); c.AddPaths(ps,ClipperLib.PolyType.ptSubject,true);
   c.Execute(ClipperLib.ClipType.ctUnion,uni,ClipperLib.PolyFillType.pftNonZero,ClipperLib.PolyFillType.pftNonZero);
-  const co=new ClipperLib.ClipperOffset(2,SC*0.25); co.AddPaths(uni,ClipperLib.JoinType.jtRound,ClipperLib.EndType.etClosedPolygon);
-  const sol=new ClipperLib.Paths(); co.Execute(sol,pad*SC); return sol;
+  const co=new ClipperLib.ClipperOffset(2,SC*0.2); co.AddPaths(uni,ClipperLib.JoinType.jtRound,ClipperLib.EndType.etClosedPolygon);
+  const o1=new ClipperLib.Paths(); co.Execute(o1,(padMM+bridgeMM)*SC);
+  const co2=new ClipperLib.ClipperOffset(2,SC*0.2); co2.AddPaths(o1,ClipperLib.JoinType.jtRound,ClipperLib.EndType.etClosedPolygon);
+  const sol=new ClipperLib.Paths(); co2.Execute(sol,-bridgeMM*SC); return sol;
+}
+function subtractHole(plate,cxSC,cySC,rSC){
+  const hole=[]; for(let i=0;i<48;i++){const t=i/48*2*Math.PI; hole.push({X:Math.round(cxSC+rSC*Math.cos(t)),Y:Math.round(cySC+rSC*Math.sin(t))});}
+  const out=new ClipperLib.Paths(); const c=new ClipperLib.Clipper();
+  c.AddPaths(plate,ClipperLib.PolyType.ptSubject,true); c.AddPath(hole,ClipperLib.PolyType.ptClip,true);
+  c.Execute(ClipperLib.ClipType.ctDifference,out,ClipperLib.PolyFillType.pftNonZero,ClipperLib.PolyFillType.pftNonZero); return out;
 }
 function platePaths(op,pad){
   let polys=pathToPolys(op,8);
@@ -188,19 +196,17 @@ function rebuild(){
   const op=FONT.getPath(text,0,0,fs);
   const tgeo=textGeo(op, engrave?th+0.2:th);
   const tpolys=pathToPolys(op,8);
-  if(!tgeo||!tpolys.length){ status.textContent='⚠️ 此字型可能無此字，換個字型試試'; return; }
+  if(!tgeo||!tpolys.length){ status.textContent='⚠️ 此字型可能無此字'; return; }
+  // 缺字偵測
+  let miss=''; for(const ch of text){ if(ch.trim() && FONT.charToGlyphIndex && FONT.charToGlyphIndex(ch)===0 && miss.indexOf(ch)<0) miss+=ch; }
   // 文字範圍 (SC, y-down)
   let mnX=Infinity,mxX=-Infinity,mnY=Infinity,mxY=-Infinity;
   tpolys.forEach(p=>p.forEach(q=>{if(q.X<mnX)mnX=q.X;if(q.X>mxX)mxX=q.X;if(q.Y<mnY)mnY=q.Y;if(q.Y>mxY)mxY=q.Y;}));
-  const cYsc=(mnY+mxY)/2, tH=mxY-mnY;
-  const connW=Math.max(2.4,pad)*SC;
-  // 吊環(左側,較薄)
-  const ringWall=2.0, ringTab=hd/2+ringWall, ringGap=4;
-  const ringCxSC=mnX-(ringGap+ringTab)*SC;
-  const baseY=mxY-tH*0.08;
-  const conns=[];
-  conns.push(capsule(ringCxSC,baseY,mxX,baseY,connW));      // 底部連接條(連所有字)
-  conns.push(capsule(ringCxSC,cYsc,ringCxSC,baseY,connW));  // 吊環脖子→連接條
+  const cYsc=(mnY+mxY)/2, tH=mxY-mnY, hr=hd/2;
+  const bridge=Math.max(3, fs*0.22);                 // 橋接間距(把分開的字連成乾淨一片)
+  // Emma 式吊環:半徑=孔的圓盤, 置左, 留 neck 連到名字
+  const ringCxSC=mnX-(hr+2*pad+bridge*0.7)*SC, ringCySC=cYsc;
+  const ringDisc=[]; for(let i=0;i<48;i++){const t=i/48*2*Math.PI; ringDisc.push({X:Math.round(ringCxSC+hr*SC*Math.cos(t)),Y:Math.round(ringCySC+hr*SC*Math.sin(t))});}
   // 右上角圖案
   const iconType=document.getElementById('p_icon').value, isz=P('p_isz');
   document.getElementById('v_isz').textContent=isz;
@@ -208,38 +214,28 @@ function rebuild(){
   if(iconType!=='none'){
     const ix=mxX+(isz*0.5)*SC, iy=mnY+(isz*0.30)*SC;       // 名字右上角
     ipT=iconPolys(iconType,isz).map(poly=>poly.map(q=>({X:q.X+ix,Y:q.Y+iy})));
-    conns.push(capsule(mxX,mnY+tH*0.22,ix,iy,connW));        // 連接圖案
     const ish=clipperToShapes(ipT);
     if(ish.length) iconGeo=new THREE.ExtrudeGeometry(ish,{depth:engrave?th+0.2:th,bevelEnabled:false,curveSegments:2});
   }
-  let allPolys=tpolys.concat(conns); if(ipT) allPolys=allPolys.concat(ipT);
-  const psol=offsetPlate(allPolys,pad);
-  if(!psol.length){ status.textContent='⚠️ 生成失敗'; return; }
+  let allPolys=tpolys.concat([ringDisc]); if(ipT) allPolys=allPolys.concat(ipT);
+  let plate=closePlate(allPolys,pad,bridge);
+  plate=subtractHole(plate,ringCxSC,ringCySC,hr*SC);       // 挖吊環孔
+  if(!plate.length){ status.textContent='⚠️ 生成失敗'; return; }
 
   if(group){ scene.remove(group); group.traverse(o=>o.geometry&&o.geometry.dispose()); }
   group=new THREE.Group();
-
-  const pgeo=new THREE.ExtrudeGeometry(clipperToShapes(psol),{depth:pt,bevelEnabled:false,curveSegments:1});
+  const pgeo=new THREE.ExtrudeGeometry(clipperToShapes(plate),{depth:pt,bevelEnabled:false,curveSegments:1});
   pgeo.scale(1,-1,1); pgeo.computeBoundingBox(); const pbb=pgeo.boundingBox;
-  // 吊環(薄環), flipped 座標
-  const rcx=ringCxSC/SC, rcy=-cYsc/SC;
-  const rs=new THREE.Shape(); rs.absarc(rcx,rcy,ringTab,0,Math.PI*2,false);
-  const rh=new THREE.Path(); rh.absarc(rcx,rcy,hd/2,0,Math.PI*2,true); rs.holes.push(rh);
-  const rgeo=new THREE.ExtrudeGeometry(rs,{depth:pt,bevelEnabled:false,curveSegments:40});
   tgeo.scale(1,-1,1); if(iconGeo) iconGeo.scale(1,-1,1);
-  const minX=Math.min(pbb.min.x,rcx-ringTab), maxX=Math.max(pbb.max.x,rcx+ringTab);
-  const minY=Math.min(pbb.min.y,rcy-ringTab), maxY=Math.max(pbb.max.y,rcy+ringTab);
-  const cX=(minX+maxX)/2, cY=(minY+maxY)/2;
-  pgeo.translate(-cX,-cY,0); rgeo.translate(-cX,-cY,0); tgeo.translate(-cX,-cY,0); if(iconGeo) iconGeo.translate(-cX,-cY,0);
-
+  const cX=(pbb.min.x+pbb.max.x)/2, cY=(pbb.min.y+pbb.max.y)/2;
+  pgeo.translate(-cX,-cY,0); tgeo.translate(-cX,-cY,0); if(iconGeo) iconGeo.translate(-cX,-cY,0);
   group.add(new THREE.Mesh(pgeo,matPlate));
-  group.add(new THREE.Mesh(rgeo,matPlate));
   const tm=new THREE.Mesh(tgeo,matText); tm.position.z=engrave?(pt-th):pt; group.add(tm);
   if(iconGeo){ const im=new THREE.Mesh(iconGeo,matText); im.position.z=engrave?(pt-th):pt; group.add(im); }
   group.rotation.x=-Math.PI/2; scene.add(group);
 
-  document.getElementById('dims').innerHTML=`尺寸 <b>${(maxX-minX).toFixed(0)}×${(maxY-minY).toFixed(0)}</b> mm<br>總厚 <b>${(pt+(engrave?0:th)).toFixed(1)}</b> mm`;
-  status.textContent=`✅ 已生成：「${text}」`;
+  document.getElementById('dims').innerHTML=`尺寸 <b>${(pbb.max.x-pbb.min.x).toFixed(0)}×${(pbb.max.y-pbb.min.y).toFixed(0)}</b> mm<br>總厚 <b>${(pt+(engrave?0:th)).toFixed(1)}</b> mm`;
+  status.textContent = miss ? ('⚠️ 此字型缺「'+miss+'」字，請改用前 4 款繁中字型') : ('✅ 已生成：「'+text+'」');
 }
 
 function frameView(){const b=new THREE.Box3().setFromObject(group||new THREE.Object3D());
